@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>LLM Implementation Notes — Ollama on home.lab</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, "Segoe UI", "Noto Sans CJK TC", sans-serif;
+         max-width: 980px; margin: 2em auto; padding: 0 1em; line-height: 1.55; }
+  h1 { border-bottom: 2px solid #888; padding-bottom: .2em; }
+  h2 { margin-top: 2em; border-bottom: 1px solid #ccc; padding-bottom: .2em; }
+  h3 { margin-top: 1.5em; }
+  .meta { color: #666; font-size: .9em; }
+  .step { background: rgba(127,127,127,.06); border-left: 4px solid #4a90e2;
+          padding: .8em 1.2em; margin: 1em 0; border-radius: 4px; }
+  .step.warn { border-left-color: #e67e22; }
+  .step.fail { border-left-color: #c0392b; }
+  .step.ok   { border-left-color: #27ae60; }
+  .step h3 { margin-top: 0; }
+  .ts { color: #4a90e2; font-family: ui-monospace, Consolas, monospace; font-size: .9em; }
+  pre, code { font-family: ui-monospace, Consolas, "Cascadia Code", monospace; }
+  pre { background: rgba(127,127,127,.08); padding: .8em 1em;
+        border-radius: 6px; overflow-x: auto; font-size: .85em; }
+  code { background: rgba(127,127,127,.12); padding: .05em .3em; border-radius: 3px; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; margin: 1em 0; }
+  th, td { border: 1px solid #999; padding: .4em .8em; text-align: left; }
+  th { background: rgba(127,127,127,.1); }
+  .label { display: inline-block; padding: .1em .5em; border-radius: 3px;
+           font-size: .8em; font-weight: 600; color: #fff; }
+  .lab-ok   { background: #27ae60; }
+  .lab-warn { background: #e67e22; }
+  .lab-fail { background: #c0392b; }
+  .lab-info { background: #4a90e2; }
+</style>
+</head>
+<body>
+
+<h1>LLM Implementation Notes — Ollama on home.lab</h1>
+
+<p class="meta">
+  目標:在 home.lab 內網部署一台獨立 Ollama VM (<code>10.0.0.63</code>),接給原本就有的 Open WebUI (<code>10.0.0.64</code>) 當本地 LLM provider。<br>
+  日期:2026-05-20。逐步實錄(包含所有踩雷),配合 <a href="README.md">README.md</a> 的整理版使用。
+</p>
+
+<h2>環境 / 既有資源</h2>
+
+<table>
+  <tr><th>項目</th><th>值</th></tr>
+  <tr><td>Open WebUI</td><td><code>http://10.0.0.64:3000/</code>(已部署,Docker)</td></tr>
+  <tr><td>MCP server</td><td><code>10.0.0.65</code>(已部署,vcf-mcp.service + mcpo)</td></tr>
+  <tr><td>vCenter</td><td><code>10.0.0.101</code>(主 lab vCenter,vSphere 8.0.3)</td></tr>
+  <tr><td>DHCP</td><td><code>10.0.0.3</code></td></tr>
+  <tr><td>DNS</td><td><code>10.0.0.200</code>(KADDNS,本機自管)</td></tr>
+  <tr><td>欲新建 VM</td><td><code>ollama.home.lab</code> @ <code>10.0.0.63/23</code></td></tr>
+  <tr><td>樣板</td><td><code>ubuntu2004temp</code>(<code>vm-1183</code>,Ubuntu 20.04, 4 vCPU, 6 GB RAM, 100 GB disk)</td></tr>
+</table>
+
+<h2>時間軸</h2>
+
+<div class="step ok">
+  <h3><span class="ts">11:30</span> 盤點 lab 環境 <span class="label lab-ok">OK</span></h3>
+  <p>用 <code>mcp__vcf-lab__list_environments</code> 列 VCF 環境,確認 vcf9 M01 vCenter <code>10.0.1.9</code> 目前 ping 不到(M01 沒開機),改用主 vCenter <code>10.0.0.101</code> 的 nested 環境。和使用者確認 IP 取 <code>10.0.0.63</code>。</p>
+</div>
+
+<div class="step fail">
+  <h3><span class="ts">11:35</span> 第一次嘗試:clone <code>mcp-server</code> VM <span class="label lab-fail">放棄</span></h3>
+  <p>本來打算直接 clone <code>mcp-server</code>(vm-16636)作 ollama VM base。Clone 完成 → 但 cloned VM 開機後會 inherit <code>mcp-server</code> 的靜態 IP <code>10.0.0.65</code> → 跟正在跑的 <code>mcp-server</code>(我自己 SSH 進去的那台、MCP server 本人)撞 IP。</p>
+  <p><strong>使用者中斷</strong>:「IP 和 MCP 衝到了,你從 TEMPLATE 重來,從 template 重新部署 <code>vmubuntu2004temp</code>」 — 重來。</p>
+  <p>學到:同網段 clone 一個正在跑的 VM,後面收尾很雷;有 template 就直接用 template + customization spec。</p>
+</div>
+
+<div class="step warn">
+  <h3><span class="ts">13:00</span> 修 MCP server (FastMCP SSE session 累積) <span class="label lab-warn">已知坑</span></h3>
+  <p>在重來之前,<code>mcp__vcf-lab__*</code> 工具開始全 hang(回 <code>Invalid request parameters</code>)。對比 CLAUDE.md 已知坑:FastMCP 的 SSE session 會累積 stale 連線。</p>
+  <pre><code># 直接 plink (PuTTY) 過去 mcp-server 重啟 vcf-mcp:
+plink -ssh -pw '1qaz@WSX3edc' root@10.0.0.65 \
+  'systemctl restart vcf-mcp; sleep 3; systemctl is-active vcf-mcp'
+# → active
+</code></pre>
+  <p>之後切回 plink 直連 mcp-server / vCenter REST,避免再 trigger 同樣的 session 累積。</p>
+</div>
+
+<div class="step ok">
+  <h3><span class="ts">13:30</span> 找 template <code>vmubuntu2004temp</code> <span class="label lab-ok">OK</span></h3>
+  <p>vCenter REST <code>/api/vcenter/vm</code> 預設 <strong>不會回 template</strong>,只回 power_state ≠ 模板的 VM。改走 SOAP API (pyvmomi) 才看得到:</p>
+  <pre><code>from pyVim.connect import SmartConnect
+from pyVmomi import vim
+content = si.RetrieveContent()
+cv = content.viewManager.CreateContainerView(content.rootFolder, [vim.VirtualMachine], True)
+for vm in cv.view:
+    if vm.config.template:
+        print(vm.name, vm._moId)
+# → ubuntu2004temp vm-1183</code></pre>
+  <p>順便 list 內建 customization spec → 有一個 "linux" type,但 IP 是 DHCP,要在 deploy 時 override。</p>
+</div>
+
+<div class="step warn">
+  <h3><span class="ts">13:35</span> 在 mcp-server 上裝 pyvmomi <span class="label lab-warn">版本鎖</span></h3>
+  <p>mcp-server 是 Ubuntu 20.04 / Python 3.8。直接 <code>pip3 install pyvmomi</code> 會裝到 8.0.x 然後 import 就吐 <code>Python 3.10 or newer is required</code>。鎖到 7.x:</p>
+  <pre><code>pip3 install 'pyvmomi&lt;8.0'</code></pre>
+</div>
+
+<div class="step ok">
+  <h3><span class="ts">13:45</span> 部署 ollama VM(template + customization spec)<span class="label lab-ok">OK</span></h3>
+  <p>單一 pyvmomi 動作搞定 — clone + 套 customization + power on:</p>
+  <pre><code>custom = vim.vm.customization.Specification(
+    identity=vim.vm.customization.LinuxPrep(
+        hostName=vim.vm.customization.FixedName(name='ollama'),
+        domain='home.lab', timeZone='Asia/Taipei', hwClockUTC=True),
+    globalIPSettings=vim.vm.customization.GlobalIPSettings(
+        dnsSuffixList=['home.lab'],
+        dnsServerList=['10.0.0.200', '10.0.0.1']),
+    nicSettingMap=[vim.vm.customization.AdapterMapping(
+        adapter=vim.vm.customization.IPSettings(
+            ip=vim.vm.customization.FixedIp(ipAddress='10.0.0.63'),
+            subnetMask='255.255.254.0',
+            gateway=['10.0.0.1']))],
+    options=vim.vm.customization.LinuxOptions())
+
+spec = vim.vm.CloneSpec(
+    location=vim.vm.RelocateSpec(datastore=ds, pool=cluster.resourcePool),
+    template=False, powerOn=True, customization=custom)
+
+task = template.CloneVM_Task(folder=folder, name='ollama', spec=spec)</code></pre>
+  <p>進度:0% → 33% → 86% → success。約 3 分鐘完成。</p>
+  <p>Customization 完成後 reboot 一次 → <code>10.0.0.63</code> ping 得到、SSH 開好、hostname = <code>ollama</code>。</p>
+</div>
+
+<div class="step ok">
+  <h3><span class="ts">13:48</span> SSH 驗證 <span class="label lab-ok">OK</span></h3>
+  <pre><code>plink -ssh -pw '1qaz@WSX3edc' root@10.0.0.63 \
+  'hostname; ip -4 addr show ens160 | grep inet; cat /etc/os-release | head -3'
+# ollama
+# inet 10.0.0.63/23 brd 10.0.1.255 scope global ens160
+# NAME="Ubuntu" VERSION="20.04.4 LTS (Focal Fossa)"</code></pre>
+  <p>對外網也通(<code>ping 8.8.8.8</code>,<code>curl ollama.com</code> 307 → github.com),代表可以做線上安裝。</p>
+</div>
+
+<div class="step fail">
+  <h3><span class="ts">13:52</span> Ollama install.sh 失敗:缺 zstd <span class="label lab-fail">已知坑</span></h3>
+  <pre><code>curl -fsSL https://ollama.com/install.sh | sh
+# &gt;&gt;&gt; Installing ollama to /usr/local
+# ERROR: This version requires zstd for extraction.
+#   - Debian/Ubuntu: sudo apt-get install zstd</code></pre>
+  <p>原因:Ollama 從 2024 中改用 <code>.tar.zst</code> 壓縮(原本 <code>.tgz</code>),Ubuntu 20.04 minimal image 沒 zstd。</p>
+  <p>解法:<code>apt-get install -y zstd curl</code> 再重跑 install script。</p>
+</div>
+
+<div class="step warn">
+  <h3><span class="ts">13:52 – 14:49</span> Ollama tarball 下載 <span class="label lab-warn">57 min</span></h3>
+  <p>install script 從 <code>https://ollama.com/download/ollama-linux-amd64.tar.zst</code> 拉,實測 lab 對外頻寬只有 300–400 KB/s。tarball 總大小 <strong>1198 MB</strong>(<code>HEAD</code> 拿到 content-length),解壓後 <code>/usr/local/lib/ollama/</code> 約 2.6 GB(主要是 CUDA libs,即使 CPU-only 也會解開)。</p>
+  <p>觀察:<code>cat /proc/&lt;curl_pid&gt;/io</code> 看 <code>rchar</code> 增加速度約每分鐘 +20 MB,符合估計。</p>
+  <p>沒有可用 mirror,GitHub release CDN 速度差不多,只能等。實際 14:49 完成。</p>
+</div>
+
+<div class="step ok">
+  <h3><span class="ts">14:49</span> Ollama 0.24.0 安裝完成 <span class="label lab-ok">OK</span></h3>
+  <pre><code># install.sh 自動建好:
+/usr/local/bin/ollama                       # binary
+/usr/local/lib/ollama/                      # libs (2.6 GB,含 cuda_v12)
+/etc/systemd/system/ollama.service          # systemd unit
+useradd -r ollama (User=ollama Group=ollama)
+systemctl enable --now ollama
+
+# 預設 listening:
+LISTEN  127.0.0.1:11434  pid=143579/ollama</code></pre>
+  <p>注意:<strong>預設只 bind <code>127.0.0.1</code></strong>,從別台主機(包含 OpenWebUI @ <code>10.0.0.64</code>)連會 connection refused。要套 override。</p>
+</div>
+
+<div class="step ok">
+  <h3><span class="ts">14:50</span> systemd override → bind <code>0.0.0.0:11434</code> <span class="label lab-ok">OK</span></h3>
+  <pre><code>mkdir -p /etc/systemd/system/ollama.service.d
+cat > /etc/systemd/system/ollama.service.d/override.conf &lt;&lt;EOF
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0:11434"
+Environment="OLLAMA_ORIGINS=*"
+Environment="OLLAMA_KEEP_ALIVE=24h"
+EOF
+systemctl daemon-reload
+systemctl restart ollama
+
+# 驗證:
+ss -tlnp | grep 11434
+# LISTEN  *:11434  *:*  users:(("ollama",pid=143920,fd=5))</code></pre>
+  <p><code>OLLAMA_KEEP_ALIVE=24h</code> 避免每次 inference 都要 reload 模型;<code>OLLAMA_ORIGINS=*</code> 是 CORS 全開(lab OK,production 別這樣)。</p>
+</div>
+
+<div class="step ok">
+  <h3><span class="ts">14:50 – 14:51</span> <code>ollama pull llama3.2:3b</code> <span class="label lab-ok">~1 min</span></h3>
+  <p>2 GB 模型(Q4_K_M 量化),從 ollama.com 拉,意外地比 install tarball 快很多 (~30 MB/s peak,猜不同 CDN edge)。</p>
+  <pre><code>ollama list
+# NAME           ID              SIZE      MODIFIED
+# llama3.2:3b    a80c4f17acd5    2.0 GB    Less than a second ago</code></pre>
+</div>
+
+<div class="step ok">
+  <h3><span class="ts">14:51</span> 本機推論測速 (CPU-only) <span class="label lab-ok">~22 tok/s</span></h3>
+  <pre><code>time curl -s http://localhost:11434/api/generate -d \
+  '{"model":"llama3.2:3b","prompt":"reply with exactly: ok","stream":false}'
+# response: 'ok'
+# eval_count: 2  tokens/sec: 21.94</code></pre>
+  <p>4 vCPU / 6 GB RAM 跑 3B / Q4_K_M 約 20 tok/s,日常用 OK。8B 模型在這台會掉到 ~5 tok/s,3B 是甜蜜點。</p>
+</div>
+
+<div class="step ok">
+  <h3><span class="ts">14:50</span> OpenWebUI 接線 <span class="label lab-ok">OK</span></h3>
+  <p>選 compose env var 而不是 UI 設定 — 持久化在 <code>docker-compose.yml</code>,git 看得到、redeploy 不會掉。</p>
+  <pre><code># /opt/open-webui/docker-compose.yml 加一行:
+services:
+  open-webui:
+    environment:
+      - WEBUI_NAME=Open WebUI
+      - OLLAMA_BASE_URL=http://10.0.0.63:11434   ← 加這行
+
+# 套用(只 recreate open-webui,mcpo 不動):
+docker compose up -d open-webui</code></pre>
+  <p>5 秒內就 ready,沒有 downtime 焦慮。</p>
+</div>
+
+<div class="step ok">
+  <h3><span class="ts">14:51</span> 端對端驗證 <span class="label lab-ok">OK</span></h3>
+  <pre><code>docker exec open-webui curl -s http://10.0.0.63:11434/api/tags
+# {"models":[{"name":"llama3.2:3b","model":"llama3.2:3b", ...
+#   "parameter_size":"3.2B","quantization_level":"Q4_K_M"}]}
+
+docker exec open-webui env | grep -i ollama
+# OLLAMA_BASE_URL=http://10.0.0.63:11434
+# USE_OLLAMA_DOCKER=false</code></pre>
+  <p>從 OpenWebUI 容器內 <code>curl</code> 看得到模型 → 瀏覽器 model 下拉就會多 <code>llama3.2:3b</code>。</p>
+</div>
+
+<h2>離線安裝 — 已準備腳本,未實測</h2>
+
+<p>三段式:</p>
+<ol>
+  <li><strong>有網機器</strong>跑 <code>scripts/prepare-offline-bundle.sh /tmp/out</code> → 抓 <code>ollama-linux-amd64.tar.zst</code> (1.2 GB) + <code>zstd.deb</code> + 從本機 <code>/usr/share/ollama/.ollama/models/</code> 把 llama3.2:3b 的 manifest + blobs copy 出來</li>
+  <li><code>tar czf bundle.tgz</code> 整包 → <code>scp</code> 到 air-gapped 目標</li>
+  <li>目標機器跑 <code>scripts/install-offline.sh /tmp/out</code>:<code>dpkg -i zstd.deb</code> → <code>zstd -d | tar -x</code> → 寫 systemd unit + override → copy 模型 blobs → <code>systemctl enable --now</code></li>
+</ol>
+<p>關鍵點:<strong>zstd 一定要先裝</strong>(focal minimal 沒裝),不然 tarball 解不開。</p>
+
+<h2>最終結果 <span class="label lab-ok">DONE</span></h2>
+
+<table>
+  <tr><th>component</th><th>endpoint</th><th>狀態</th></tr>
+  <tr><td>Ollama API</td><td><code>http://10.0.0.63:11434</code></td><td>active, listening *:11434</td></tr>
+  <tr><td>Open WebUI</td><td><code>http://10.0.0.64:3000/</code></td><td>OLLAMA_BASE_URL 已設,看得到 model</td></tr>
+  <tr><td>Model</td><td><code>llama3.2:3b</code> (2.0 GB, Q4_K_M)</td><td>~22 tok/s CPU-only</td></tr>
+  <tr><td>離線安裝</td><td><code>scripts/prepare-offline-bundle.sh</code> + <code>install-offline.sh</code></td><td>腳本就緒</td></tr>
+</table>
+
+<h2>學到的</h2>
+<ul>
+  <li><strong>同網段 clone running VM 是地雷</strong>:cloned VM 開機後 IP 撞,而且如果 source 就是你的 jump host(像 mcp-server)會把自己鎖在外面。用 <strong>template + customization spec</strong> 一次到位,別走 clone-then-fix 那條路。</li>
+  <li><strong>pyvmomi 8.0+ 鎖 Python 3.10+</strong>:Ubuntu 20.04 / Python 3.8 上要 <code>pip3 install 'pyvmomi&lt;8.0'</code>。</li>
+  <li><strong>vCenter REST <code>/api/vcenter/vm</code> 不回 template</strong>(<code>template=True</code> 的 VM 不在 list)。要 list template 必走 SOAP / pyvmomi。</li>
+  <li><strong>Ollama 2024 後改用 <code>.tar.zst</code></strong>:Ubuntu 20.04 minimal 沒 zstd,install.sh 會明確報錯 — 不是神祕失敗。</li>
+  <li><strong>Ollama 預設只 bind <code>127.0.0.1</code></strong>:不套 systemd override 任何外部主機都連不到。</li>
+  <li><strong>FastMCP SSE session 會累積</strong>:長時間操作可能 trigger,看到 MCP tool 全 hang 就 <code>systemctl restart vcf-mcp</code>(會斷自己 SSE,等 1–3 分鐘 reconnect)。</li>
+</ul>
+
+</body>
+</html>

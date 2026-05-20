@@ -1,0 +1,9 @@
+*.tgz
+*.tar.gz
+*.tar.zst
+*.bin
+*.gguf
+ollama-models/
+offline-bundle/
+.env
+.DS_Store
