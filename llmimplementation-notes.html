@@ -250,6 +250,93 @@ docker exec open-webui env | grep -i ollama
   <tr><td>離線安裝</td><td><code>scripts/prepare-offline-bundle.sh</code> + <code>install-offline.sh</code></td><td>腳本就緒</td></tr>
 </table>
 
+<h2>離線安裝驗證(15:24 – 15:48)</h2>
+
+<p>使用者要求:<strong>另開一台 VM 完全用 offline bundle 裝一次,且 MCP 也要有 offline install。</strong></p>
+
+<div class="step ok">
+  <h3><span class="ts">15:24</span> 在 .63 (ollama VM) 跑 <code>prepare-offline-bundle.sh</code> <span class="label lab-ok">OK</span></h3>
+  <p>從本機 <code>/usr/share/ollama/.ollama/models/</code> 把 llama3.2:3b 的 manifest + 6 個 blobs copy 出來,加上重新拉 (1.2 GB, 38 MB/s 這次) tarball + apt-get download zstd 0.34 MB。</p>
+  <p>意外:同樣 URL 第一次裝(13:52)只有 350 KB/s,這次 38 MB/s,差 100×。lab 對外 CDN 變動不大可控。</p>
+  <p>Bundle 結果:3.0 GB tgz, 19 entries, 語法 lint 過。</p>
+</div>
+
+<div class="step ok">
+  <h3><span class="ts">15:30</span> 部署驗證 VM <code>offline-test</code> @ 10.0.0.66 <span class="label lab-ok">OK</span></h3>
+  <p>同樣的 pyvmomi 流程(復用 [[scripts/deploy-vm.py]] 的範本,只改 NAME / IP),clone + customization 一次到位,~2 分鐘。</p>
+</div>
+
+<div class="step ok">
+  <h3><span class="ts">15:35</span> 設計 + 寫 MCP offline scripts <span class="label lab-ok">OK</span></h3>
+  <p>觀察 <code>/opt/vcf-mcp/</code> 結構:</p>
+  <ul>
+    <li>Python 3.11 來自 <code>uv</code>(<code>/root/.local/share/uv/python/cpython-3.11.15-...</code>,96 MB)</li>
+    <li>venv 內含 50+ packages(<code>pip list</code> 跑不出來是因為 venv 用 uv 建的沒裝 pip,但 site-packages 都在)</li>
+    <li>cert.pem / key.pem / keys.json 都在 <code>/opt/vcf-mcp/</code></li>
+  </ul>
+  <p>策略:<strong>整個 venv 跟 uv-python 一起 tar</strong>,不 reinstall packages — 直接 untar 就能跑。SAN cert 在 install 時用目標 IP 重生(<code>gen-san-cert.sh</code>),避免從別處搬過去 cert SAN 還是寫 source IP。</p>
+</div>
+
+<div class="step ok">
+  <h3><span class="ts">15:39</span> 在 mcp-server 跑 <code>prepare-mcp-offline-bundle.sh</code> <span class="label lab-ok">44 MB</span></h3>
+  <pre><code>python311.tgz  32 MB  (uv-managed cpython-3.11.15)
+vcf-mcp.tgz    13 MB  (code + venv + keys.json + cert,排除 *.bak / __pycache__)
+vcf-mcp.service + 3 個 .sh + README.txt</code></pre>
+  <p>比 Ollama bundle 小 70 倍 — Ollama 那 1.2 GB 主要是 CUDA libs。</p>
+</div>
+
+<div class="step ok">
+  <h3><span class="ts">15:40</span> scp 兩個 bundle 到 .66 <span class="label lab-ok">~30s</span></h3>
+  <p>用 <code>sshpass</code> 把兩個 bundle 平行 scp 過去(.63 → .66 + .65 → .66)。lab 內網大約 100 MB/s,3.0 GB ~30s。</p>
+</div>
+
+<div class="step fail">
+  <h3><span class="ts">15:42</span> Ollama offline install crash loop <span class="label lab-fail">Bug</span></h3>
+  <pre><code>Error: mkdir /var/lib/ollama: permission denied: ensure path elements are traversable
+systemd[1]: ollama.service: Failed with result 'exit-code'.
+systemd[1]: ollama.service: Scheduled restart job, restart counter is at 6.</code></pre>
+  <p><strong>根因</strong>:我寫 README 時順手在 <code>systemd/ollama.service.override.conf</code> 加了 <code>OLLAMA_MODELS=/var/lib/ollama/models</code> 當作「自訂模型位置」的範例,結果它就真的生效。Ollama 以 <code>ollama</code> user 跑,根本沒權限 <code>mkdir /var/lib/ollama</code>。</p>
+  <p>而且更糟:install-offline.sh 是把 blobs copy 到預設路徑 <code>/usr/share/ollama/.ollama/models/</code>,override 卻指到別的地方 — 就算建得起來 model 也找不到。</p>
+  <p><strong>修法</strong>:刪掉 <code>OLLAMA_MODELS</code> 那行 — 在線上裝那台 (.63) 從來就沒設,只是預設路徑剛好被 install.sh 用 <code>ollama:ollama</code> 權限建好 +oh 我一直以為有設過... 算了,刪。改完 <code>systemctl daemon-reload &amp;&amp; restart ollama</code> 立刻起來。</p>
+  <p><strong>學到</strong>:offline 驗證的價值就在這 — online install 因為 install.sh 自己會 <code>mkdir + chown</code>,所以漏掉這個 mismatch 也跑得起來;到 fresh VM 才被抓到。<strong>沒驗證等於沒實作。</strong></p>
+</div>
+
+<div class="step ok">
+  <h3><span class="ts">15:43</span> Ollama offline install validated <span class="label lab-ok">24 tok/s</span></h3>
+  <pre><code>ollama list
+# NAME           ID              SIZE      MODIFIED
+# llama3.2:3b    a80c4f17acd5    2.0 GB    About a minute ago
+
+curl -s http://localhost:11434/api/generate -d \
+  '{"model":"llama3.2:3b","prompt":"reply with exactly: ok","stream":false}'
+# response: 'ok',  tokens/sec: 24.2</code></pre>
+  <p>跟 .63 同樣 24 tok/s,代表 model blobs copy 正確、override 對了、systemd unit 跟 online install 等價。<strong>完全沒呼叫 <code>ollama pull</code></strong> — model 是 bundle 帶過去的。</p>
+</div>
+
+<div class="step ok">
+  <h3><span class="ts">15:46</span> MCP offline install validated <span class="label lab-ok">SSE + SAN OK</span></h3>
+  <pre><code>== Cert SAN entries ==
+IP Address:10.0.0.66, IP Address:127.0.0.1, DNS:offline-test, DNS:localhost
+
+ss -tlnp | grep 7000
+# LISTEN 0 2048 0.0.0.0:7000 *:* users:(("python3",pid=3798,fd=7))
+
+curl -sk -H "Authorization: Bearer ILnx5..." https://10.0.0.66:7000/sse -m 5
+# event: endpoint
+# data: /messages/?session_id=2abee159a07b4a9b878b5cf908266dac</code></pre>
+  <p>SSE endpoint 即時回應,cert SAN 正確包含新 IP 10.0.0.66 跟 hostname。從別台機器 (任何信任這個 self-signed cert 的 client) 都能連。</p>
+</div>
+
+<div class="step ok">
+  <h3><span class="ts">15:48</span> 收尾 <span class="label lab-ok">OK</span></h3>
+  <ul>
+    <li><code>shutdown -h now</code> on .66 — 驗證 VM 保留,沒刪</li>
+    <li>修 <code>systemd/ollama.service.override.conf</code> bug 進 repo</li>
+    <li>新增 README §5(MCP offline)+ §4.4 (Ollama validated)</li>
+    <li>push 到 GitHub</li>
+  </ul>
+</div>
+
 <h2>學到的</h2>
 <ul>
   <li><strong>同網段 clone running VM 是地雷</strong>:cloned VM 開機後 IP 撞,而且如果 source 就是你的 jump host(像 mcp-server)會把自己鎖在外面。用 <strong>template + customization spec</strong> 一次到位,別走 clone-then-fix 那條路。</li>
@@ -258,6 +345,9 @@ docker exec open-webui env | grep -i ollama
   <li><strong>Ollama 2024 後改用 <code>.tar.zst</code></strong>:Ubuntu 20.04 minimal 沒 zstd,install.sh 會明確報錯 — 不是神祕失敗。</li>
   <li><strong>Ollama 預設只 bind <code>127.0.0.1</code></strong>:不套 systemd override 任何外部主機都連不到。</li>
   <li><strong>FastMCP SSE session 會累積</strong>:長時間操作可能 trigger,看到 MCP tool 全 hang 就 <code>systemctl restart vcf-mcp</code>(會斷自己 SSE,等 1–3 分鐘 reconnect)。</li>
+  <li><strong>「文件寫得很完整」 ≠ 「真的能跑」</strong>:第一輪我把 <code>OLLAMA_MODELS</code> 寫進 override conf 當範例,線上裝因為 install.sh 會 <code>mkdir + chown</code> 所以沒事,offline 在 fresh VM 就馬上 crash loop。<strong>沒在 clean room 跑過的離線腳本約等於沒寫。</strong></li>
+  <li><strong>uv-managed Python 帶得走</strong>:不需要 reinstall packages 或裝 uv,把 <code>/root/.local/share/uv/python/&lt;version&gt;/</code> 整包 tar 過去,目標機 untar 到同樣路徑就行(symlink 在 venv 裡是寫死路徑的,target 一定要一樣)。</li>
+  <li><strong>self-signed cert SAN 要綁目標 IP</strong>:從別處 clone 過來的 cert SAN 還是寫源頭 IP,modern httpx / Python 3.10+ 不認 CN-only,連 <code>curl --insecure</code> 都會 verify 失敗。install 時用 <code>openssl req -x509 ... -extensions v3</code> 帶 <code>[san]</code> section 重生最穩。</li>
 </ul>
 
 </body>

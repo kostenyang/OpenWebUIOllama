@@ -368,11 +368,88 @@ sudo bash scripts/install-offline.sh /tmp/ollama-offline
 
 ### 4.3 為什麼不直接用 ollama-linux-amd64.tar.zst
 
-`tar.zst` 在 `ollama.com/download/` 是給線上 install script 用的格式,Ubuntu 20.04 minimal 沒 zstd 就解不開。`.tgz` (從 GitHub release 拿) 比較通用,連 BusyBox `tar` 都能解。
+`tar.zst` 在 `ollama.com/download/` 是給線上 install script 用的格式,Ubuntu 20.04 minimal 沒 zstd 就解不開。bundle 把 `zstd.deb` 先打進去,目標機 `dpkg -i zstd.deb` 後就能解開 tarball。
+
+### 4.4 已驗證(2026-05-20 in lab)
+
+在 fresh `offline-test` VM (10.0.0.66, 從 ubuntu2004temp deploy) 跑了一次完整流程,結果:
+
+| 階段 | 時間 | 結果 |
+| --- | --- | --- |
+| scp bundle (.63 → .66) | ~30s | 3.0 GB lab 內部 ~100 MB/s |
+| `install-offline.sh` | ~30s | zstd → 解壓 → systemd → enable |
+| `ollama list` | <1s | 看得到 `llama3.2:3b` (沒 pull!) |
+| 第一次 inference | ~10s cold load | 24 tok/s,跟 .63 同樣速度 |
+
+**踩雷實錄**:第一次 install 失敗,因為 `override.conf` 寫了 `OLLAMA_MODELS=/var/lib/ollama/models`,但 `ollama` user 沒權限建 `/var/lib/ollama/`,服務 crash loop 報 `mkdir: permission denied`。修法:不指定 `OLLAMA_MODELS`,用預設 `/usr/share/ollama/.ollama/models`(install-offline.sh 已經把 blobs 放這裡,owner 改 ollama:ollama)。已修進 repo 的 `systemd/ollama.service.override.conf`。
 
 ---
 
-## 5. 升級 / 換模型 / 移除
+## 5. vcf-mcp Offline 安裝
+
+跟 Ollama 同樣三段:**有 mcp 那台機(`10.0.0.65`)準備 bundle → scp → air-gapped 機器 install**。Bundle 比 Ollama 小很多(44 MB),因為 vcf-mcp 本身只是個 Python 程式 + 一個 uv-managed Python 3.11 runtime。
+
+### 5.1 準備 bundle (在現有 mcp-server)
+
+```bash
+ssh root@10.0.0.65
+git clone https://github.com/kostenyang/OpenWebUIOllama.git /opt/setup
+bash /opt/setup/mcp/prepare-mcp-offline-bundle.sh /tmp/mcp-offline
+tar czf /tmp/mcp-offline-bundle.tgz -C /tmp mcp-offline
+ls -lh /tmp/mcp-offline-bundle.tgz   # ~44 MB
+```
+
+Bundle 內容:
+
+| 檔案 | 來源 | 大小 |
+| --- | --- | --- |
+| `python311.tgz` | `/root/.local/share/uv/python/cpython-3.11.15-...` | ~32 MB(壓縮) |
+| `vcf-mcp.tgz` | `/opt/vcf-mcp/` (含 venv + keys.json + 程式碼,排除 `*.bak` / `__pycache__`) | ~13 MB(壓縮) |
+| `vcf-mcp.service` | `/etc/systemd/system/vcf-mcp.service` | <1 KB |
+| `install-mcp-offline.sh` | repo | 3 KB |
+| `gen-san-cert.sh` | repo | 1 KB |
+
+### 5.2 安裝在目標 VM
+
+```bash
+scp mcp-offline-bundle.tgz root@<target>:/tmp/
+ssh root@<target>
+tar xzf /tmp/mcp-offline-bundle.tgz -C /tmp
+bash /tmp/mcp-offline/install-mcp-offline.sh /tmp/mcp-offline
+```
+
+`install-mcp-offline.sh` 流程:
+
+1. 解 `python311.tgz` 到 `/root/.local/share/uv/python/` + 建 unversioned symlink(venv 的 interpreter 鏈是寫死路徑的)
+2. 解 `vcf-mcp.tgz` 到 `/opt/vcf-mcp/`
+3. **自動重生 SAN cert**(`gen-san-cert.sh`),用目標 VM 自己的 IP — 不重生的話舊 cert SAN 還是寫 `10.0.0.65`,別台 client 連會吐 `IP address mismatch`
+4. install systemd unit → `enable --now`
+
+`--ip` 可以手動指定 cert 裡的 IP(預設用 `hostname -I` 第一個),`--no-cert` 跳過重生(只在原機 backup/restore 用,不要在新 IP 用)。
+
+### 5.3 已驗證(2026-05-20 in lab)
+
+| 階段 | 時間 | 結果 |
+| --- | --- | --- |
+| scp bundle | <1s | 44 MB,內網秒傳 |
+| `install-mcp-offline.sh` | ~5s | 解壓 → SAN cert (10.0.0.66) → systemd |
+| `ss -tlnp | grep 7000` | OK | `0.0.0.0:7000 ... python3` |
+| `curl -k https://10.0.0.66:7000/sse` | OK | `event: endpoint` 立刻回 |
+| cert SAN | OK | `IP:10.0.0.66, IP:127.0.0.1, DNS:offline-test, DNS:localhost` |
+
+### 5.4 token 管理
+
+`vcf-mcp.tgz` 把現有 `keys.json` 一起搬過去 — 也就是 token 是 source 機跟 target 機**共用**。要分開的話,在 target 機跑完 install 後:
+
+```bash
+python3 -c 'import json,secrets; \
+  print(json.dumps({"admin": secrets.token_urlsafe(32)}))' > /opt/vcf-mcp/keys.json
+systemctl restart vcf-mcp
+```
+
+---
+
+## 6. 升級 / 換模型 / 移除
 
 ### 升級 Ollama
 
@@ -407,7 +484,7 @@ userdel ollama
 
 ---
 
-## 6. 常見問題
+## 7. 常見問題
 
 | 症狀 | 原因 | 解法 |
 | --- | --- | --- |
@@ -419,6 +496,8 @@ userdel ollama
 | `ollama pull` 中斷 / 慢 | 連 ollama.com 的 layer 拉到一半斷 | 重跑 `ollama pull <model>` 會續傳 |
 | 模型佔太多 disk | `/usr/share/ollama/.ollama/models` 累積 | `ollama rm <model>` 或搬到別的 disk:設 `OLLAMA_MODELS=/mnt/...` |
 | Customization 沒生效(IP/hostname 沒換) | 樣板裡 `open-vm-tools` 沒裝 / 太舊 | template 那邊裝好 `open-vm-tools` 再 convert template |
+| Ollama 啟動 `mkdir /var/lib/ollama: permission denied` | override.conf 把 `OLLAMA_MODELS` 指到 ollama user 沒權限的路徑 | 拿掉 `OLLAMA_MODELS=` 那行,讓 Ollama 用預設 `/usr/share/ollama/.ollama/models` |
+| mcpo 連 vcf-mcp `certificate verify failed: IP address mismatch` | 從別處 clone 過來的 cert SAN 還是寫原機 IP | 跑 `mcp/gen-san-cert.sh /opt/vcf-mcp <自己的IP>` 重生 cert,再 `systemctl restart vcf-mcp` |
 
 ---
 
@@ -431,8 +510,12 @@ userdel ollama
 ├── scripts/
 │   ├── deploy-vm.py                          pyvmomi 部署 ollama VM (§0.1)
 │   ├── install-online.sh                     §1 全包,zstd → install.sh → override → pull
-│   ├── prepare-offline-bundle.sh             §4.1 在有網機器抓 bundle
-│   └── install-offline.sh                    §4.2 在目標 VM 用 bundle 裝
+│   ├── prepare-offline-bundle.sh             §4.1 在有網機器抓 ollama bundle
+│   └── install-offline.sh                    §4.2 在目標 VM 用 bundle 裝 ollama
+├── mcp/
+│   ├── prepare-mcp-offline-bundle.sh         §5.1 在現有 mcp-server 打包 vcf-mcp
+│   ├── install-mcp-offline.sh                §5.2 在目標 VM 用 bundle 裝 vcf-mcp
+│   └── gen-san-cert.sh                       §5.2 重生有 SAN 的 TLS cert(避免 IP mismatch)
 ├── netplan/
 │   └── 00-installer-config.yaml              靜態 IP 範本 (template customization 已自動套用,這份只是參考)
 ├── systemd/
