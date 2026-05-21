@@ -9,6 +9,8 @@
 > 📁 **mcpo 設定速查 / 維運場景** → [`mcpo/`](mcpo/README.md)(OpenWebUI ↔ vcf-mcp 的代理,token 三層怎麼分、換 cert 怎麼 reload)
 >
 > 📁 **vcf-mcp 離線安裝** → [`mcp/`](mcp/)(uv-python + venv tar 包搬到 air-gapped 機器)
+>
+> 📁 **整套離線部署 runbook** → [`runbook/`](runbook/README.md)(從零到能用,Ollama + vcf-mcp + OpenWebUI + mcpo 一動一動對應一個 script,含 wire-up 跟端對端 verify)
 
 | 項目 | 值 |
 | --- | --- |
