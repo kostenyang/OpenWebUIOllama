@@ -173,18 +173,20 @@ OpenWebUI 啟動時會同時對兩個 URL 跑 `/api/tags`,把回來的 model 全
 
 ---
 
-## 4. Benchmark 預期值
+## 4. Benchmark 實測
 
-12 vCPU / 32 GB RAM / Q4_K_M 量化的 ballpark(實測會補進 [llmimplementation-notes.html](../llmimplementation-notes.html)):
+**vCenter nested VM @ Intel i5-10400 (host) / 12 vCPU / 32 GB RAM / Q4_K_M:**
 
-| Model | Size | tok/s |
-| --- | --- | --- |
-| `llama3.2:3b` (對照組) | 2.0 GB | 35–45(12 vCPU 比 base 那台 4 vCPU 快很多) |
-| `phi4:14b` | 9.1 GB | 10–13 |
-| `qwen2.5:14b` | 9.0 GB | 10–13 |
-| `deepseek-r1:14b` | 9.0 GB | 8–11(thinking mode 會多算很多 token) |
+| Model | Size | 實測 tok/s | 備註 |
+| --- | --- | --- | --- |
+| `phi4:14b` | 9.1 GB | **2.84** | 12 cores 都 100%,純 CPU bound |
+| `qwen2.5:14b` | 9.0 GB | **2.97** | 同上 |
 
-第一次 inference 因為 cold-load 9 GB 進 RAM,會多 ~5–10 秒。設 `OLLAMA_KEEP_ALIVE=24h` 之後就好。
+> ⚠️ **比裸機慢很多**。Phi-4 在裸機 i5-10400 預期 10+ tok/s,nested ESXi 上掉到 ~3 tok/s。原因猜:nested virt 失去 host CPU 的 AVX-512 / 某些向量指令、L3 cache 隔離效率差。**有 GPU 還是請走 GPU**,CPU 只是 fallback。
+>
+> 同樣的 model 在這台跟 base ollama (10.0.0.63, 4 vCPU/6 GB RAM) 比:那台跑 14B 會 swap + 1 tok/s 或直接 OOM,這台至少能用。
+
+第一次 inference cold-load 9 GB 進 RAM,會多 ~10 秒。設 `OLLAMA_KEEP_ALIVE=24h` 之後不會再 reload。同時 load 兩個 14B 會吃 18 GB RAM,32 GB 還剩 ~10 GB 給 OS + buff/cache,**OK 但不要再加第三個 14B**。
 
 ---
 

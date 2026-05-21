@@ -44,8 +44,8 @@ Ollama:  http://$(hostname -I | awk '{print $1}'):11434
 Models:  phi4:14b, qwen2.5:14b
 
 Next:
-  - Add to Open WebUI: comma-extend OLLAMA_BASE_URL on 10.0.0.64
-       OLLAMA_BASE_URL=http://10.0.0.63:11434,http://10.0.0.67:11434
+  - Add to Open WebUI: semicolon-extend OLLAMA_BASE_URL on 10.0.0.64
+       OLLAMA_BASE_URL=http://10.0.0.63:11434;http://10.0.0.67:11434
     or Admin Panel → Settings → Connections → Ollama API → + Add
        URL: http://$(hostname -I | awk '{print $1}'):11434
 EOF
