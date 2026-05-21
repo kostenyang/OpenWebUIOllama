@@ -5,6 +5,10 @@
 全程 root SSH 操作,Ubuntu 20.04 (focal),目標 10–15 分鐘搞定(不含模型下載)。
 
 > 📁 **想跑 14B 等級的大模型(Phi-4 / Qwen2.5-14B)?** → 另一台肉一點的 VM,看 [`ollama-14b/`](ollama-14b/README.md)(12 vCPU / 32 GB RAM / 200 GB disk @ `10.0.0.67`)。本檔是 base 3B–7B 用的小台。
+>
+> 📁 **mcpo 設定速查 / 維運場景** → [`mcpo/`](mcpo/README.md)(OpenWebUI ↔ vcf-mcp 的代理,token 三層怎麼分、換 cert 怎麼 reload)
+>
+> 📁 **vcf-mcp 離線安裝** → [`mcp/`](mcp/)(uv-python + venv tar 包搬到 air-gapped 機器)
 
 | 項目 | 值 |
 | --- | --- |
