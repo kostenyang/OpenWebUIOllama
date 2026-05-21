@@ -7,9 +7,13 @@
 #   - has internet (to docker pull),
 #   - already has the openwebui repo cloned (or just the compose + mcpo files).
 #
-# Bundle contents (~2.5 GB):
+# Bundle contents (~2.7 GB):
 #   open-webui.tar       docker save ghcr.io/open-webui/open-webui:main
 #   mcpo.tar             docker save ghcr.io/open-webui/mcpo:main
+#   docker-debs/         docker-ce + cli + containerd + compose-plugin + buildx (.deb)
+#                        so the target doesn't need internet to install Docker
+#   docker-keyring.gpg   apt signing key (only if you want to also wire apt; install
+#                        doesn't need this — dpkg -i suffices)
 #   docker-compose.yml   compose entry (copied from the openwebui repo)
 #   mcpo/                config.json + certs/  (placeholder; install will customise)
 #   functions/           Open WebUI Function pipes (Claude provider, etc.)
@@ -98,7 +102,33 @@ if [ -d "$OPENWEBUI_REPO/functions" ]; then
     cp -r "$OPENWEBUI_REPO/functions/." "$OUT/functions/" 2>/dev/null || true
 fi
 
-echo "== 4. installer + readme =="
+echo "== 4. download Docker .deb packages =="
+# Use the official Docker apt repo so the target can dpkg -i offline.
+# We trigger get.docker.com so it sets up /etc/apt/sources.list.d/docker.list
+# (it's safe to let the script fail at docker-model-plugin; the repo gets added first).
+DOCKER_DEBS=( docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-buildx-plugin )
+if ! ls /etc/apt/sources.list.d/docker.list >/dev/null 2>&1; then
+    curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+    sh /tmp/get-docker.sh >/dev/null 2>&1 || true   # may fail at docker-model-plugin — apt repo is what we want
+fi
+apt-get update -qq
+
+mkdir -p "$OUT/docker-debs"
+# download-only keeps the deps too; we then move them out of /var/cache
+apt-get install -y --download-only --reinstall "${DOCKER_DEBS[@]}" >/dev/null
+# also pull pure transitive deps that may not yet be in the cache from this run
+for pkg in "${DOCKER_DEBS[@]}"; do
+    apt-cache depends "$pkg" 2>/dev/null | awk '/Depends:/ {print $2}' | \
+        grep -v '<' | xargs -r -n1 apt-get install -y --download-only --reinstall 2>/dev/null || true
+done
+cp /var/cache/apt/archives/*.deb "$OUT/docker-debs/" 2>/dev/null || true
+# keep just docker + its direct deps; drop docker-model-plugin (focal won't have it,
+# and we don't want it either — it's the very thing that breaks the online install).
+rm -f "$OUT/docker-debs/docker-model-plugin"*.deb 2>/dev/null || true
+ls -1 "$OUT/docker-debs/" | head -20
+du -sh "$OUT/docker-debs"
+
+echo "== 5. installer + readme =="
 cp "$(dirname "$0")/install-openwebui-offline.sh" "$OUT/install-offline.sh" 2>/dev/null || \
     echo "  (install-openwebui-offline.sh not found at $(dirname "$0"); copy it manually)"
 chmod +x "$OUT/install-offline.sh" 2>/dev/null || true

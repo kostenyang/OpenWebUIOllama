@@ -16,6 +16,13 @@ MCP_HOST="${MCP_HOST:-10.0.0.65}"
 OLLAMA_HOSTS="${OLLAMA_HOSTS:-10.0.0.63 10.0.0.67}"
 OWUI_TO_MCPO_TOKEN="${OWUI_TO_MCPO_TOKEN:-openwebui-mcpo-secret}"
 
+# SSH helper: use sshpass if DEFAULT_SSH_PASS env var set; otherwise plain ssh
+if [ -n "${DEFAULT_SSH_PASS:-}" ] && command -v sshpass >/dev/null; then
+    SSH="sshpass -p $DEFAULT_SSH_PASS ssh -o StrictHostKeyChecking=no -o BatchMode=no"
+else
+    SSH="ssh -o StrictHostKeyChecking=no"
+fi
+
 PASS=0; FAIL=0
 chk() {
     local name="$1"; shift
@@ -38,12 +45,12 @@ done
 
 echo "=== vcf-mcp ==="
 chk "$MCP_HOST:7000 reachable"       timeout 3 bash -c "</dev/tcp/$MCP_HOST/7000"
-chk "$MCP_HOST SSE responds"         bash -c "curl -fsk -m 5 https://$MCP_HOST:7000/sse | head -1 | grep -q 'event:'"
+chk "$MCP_HOST SSE 401 (auth layer up)" bash -c "[ \$(curl -sk -o /dev/null -w '%{http_code}' -m 5 https://$MCP_HOST:7000/sse) = 401 ]"
 chk "$MCP_HOST cert has SAN"         bash -c "echo | openssl s_client -connect $MCP_HOST:7000 -servername $MCP_HOST 2>/dev/null | openssl x509 -noout -ext subjectAltName 2>/dev/null | grep -q 'IP Address'"
 
 echo "=== OpenWebUI ==="
 chk "$OWUI_HOST:3000 returns 200"    bash -c "[ \$(curl -fsS -o /dev/null -w '%{http_code}' http://$OWUI_HOST:3000/) = 200 ]"
-chk "$OWUI_HOST docker open-webui up" bash -c "ssh -o StrictHostKeyChecking=no root@$OWUI_HOST 'docker ps --format \"{{.Names}}\" | grep -q open-webui'"
+chk "$OWUI_HOST docker open-webui up" bash -c "$SSH root@$OWUI_HOST 'docker ps --format \"{{.Names}}\" | grep -q open-webui'"
 
 echo "=== mcpo ==="
 chk "$OWUI_HOST:8000 reachable"      timeout 3 bash -c "</dev/tcp/$OWUI_HOST/8000"
@@ -52,7 +59,7 @@ chk "mcpo → vcf-mcp live tool call"  bash -c "curl -fsS -X POST -H 'Authorizat
 
 echo "=== OpenWebUI sees Ollama backends ==="
 for h in $OLLAMA_HOSTS; do
-    chk "OWUI → $h:11434 /api/tags"   bash -c "ssh -o StrictHostKeyChecking=no root@$OWUI_HOST 'docker exec open-webui curl -fsS -m 5 http://$h:11434/api/tags' | python3 -c 'import json,sys; json.load(sys.stdin)'"
+    chk "OWUI → $h:11434 /api/tags"   bash -c "$SSH root@$OWUI_HOST 'docker exec open-webui curl -fsS -m 5 http://$h:11434/api/tags' | python3 -c 'import json,sys; json.load(sys.stdin)'"
 done
 
 echo

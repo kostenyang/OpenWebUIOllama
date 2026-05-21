@@ -47,6 +47,12 @@ $SCP "root@$MCP:/opt/vcf-mcp/cert.pem" "$TMP/vcf-mcp.pem"
 ls -la "$TMP/vcf-mcp.pem"
 
 echo "== 2. ship cert + write config.json on $OWUI =="
+# Defensive: if the target path is a directory (Docker bind-mount gotcha when
+# the file didn't exist at compose-up time), nuke it first.
+run_owui "if [ -d /opt/open-webui/mcpo/certs/vcf-mcp.pem ]; then \
+    echo '  removing stale cert directory'; \
+    rm -rf /opt/open-webui/mcpo/certs/vcf-mcp.pem; \
+fi"
 $SCP "$TMP/vcf-mcp.pem" "root@$OWUI:/opt/open-webui/mcpo/certs/vcf-mcp.pem"
 rm -rf "$TMP"
 

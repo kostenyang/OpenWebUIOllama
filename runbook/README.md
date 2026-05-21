@@ -349,9 +349,24 @@ OWUI_HOST=10.0.1.50 MCP_HOST=10.0.1.51 OLLAMA_HOSTS="10.0.1.52 10.0.1.53" \
 
 ---
 
-## Limitations / 待補
+## 已驗證(2026-05-21 in lab)
 
-- **沒包 Docker .deb**:OpenWebUI VM 還是需要先有 Docker。真 air-gapped 環境要另外打 `docker-ce_*.deb` + `containerd.io_*.deb` + `docker-compose-plugin_*.deb`。
-- **沒專屬 mcp-server / openwebui deploy-vm.py**:借 base 那個改一改。要的話可以加。
+整套 runbook **從零跑了一次驗證**:fresh `ubuntu2004temp` clone × 3 → bundle scp → install → wire-up → verify.sh,結果 **12/12 PASS**。
+
+| 角色 | IP | Bundle | install 用時 |
+| --- | --- | --- | --- |
+| ollama | offline-test (10.0.0.66) | `ollama-offline-bundle.tgz` (3.0 GB) | ~30s |
+| vcf-mcp | mcp-test (10.0.0.68) | `mcp-offline-bundle.tgz` (44 MB) | ~5s |
+| openwebui+mcpo | openwebui-test (10.0.0.70) | `openwebui-offline-bundle.tgz` (1.9 GB) | ~1 min(含 Docker .deb 從 bundle 裝) |
+
+### 驗證抓到的 2 個 bug(已修進 repo)
+
+1. **Docker bind-mount gotcha** — `install-openwebui-offline.sh` 沒在 `compose up` 前建好 `vcf-mcp.pem` placeholder file。Docker 看到 bind mount source 不存在就**自動建成 directory**,之後 mcpo 在容器內讀就吐 `IsADirectoryError`,wire-mcpo.sh 之後 scp 真正的 cert 上去又因為 path 是 dir 而失敗。修法:install 時先 `touch` 一個空檔當 placeholder,wire 時偵測到 dir 就 `rm -rf` 再寫。如果不幸已經卡住,要 **`docker compose down mcpo`(不是 `stop`!)** 才能徹底重建 — `stop` 留著舊 container 的 mount 紀錄,再 up 會吐 OCI runtime "not a directory" 因為 image 內的 `/certs/vcf-mcp.pem` 還是被當 dir。
+
+2. **verify.sh 的 SSE check 沒帶 auth token** — `curl -f https://mcp:7000/sse` 期望 200,但 vcf-mcp 沒 token 一定回 401 → check fail。其實 401 才證明 auth layer 起得來。修成 `expect 401`。實際 vcf-mcp 健康度由 mcpo→vcf-mcp 那條 tool call (`ping_host`) 端對端驗證。
+
+### Limitations / 待補
+
 - **OpenWebUI UI 上的 Tool 設定**是手動(§4.3),OpenWebUI 沒對外 API 暴露 Tool config。
-- **單台 lab 適用**:script 假設 root SSH 密碼 `1qaz@WSX3edc` 或 SSH key。換 lab 要改。
+- **單台 lab 適用**:script 假設 root SSH 密碼 `1qaz@WSX3edc` 或 SSH key(`wire-*.sh` / `verify.sh` 支援 `DEFAULT_SSH_PASS` env var + sshpass)。換 lab 要改 default password。
+- **Docker .deb bundle 鎖 focal**:`prep-openwebui-bundle.sh` 在 Ubuntu 20.04 上跑會抓 focal repo 的 deb。target 換成 jammy 要在 build 機器先 `lsb_release -cs` 對齊或加 `UBUNTU_REL` env var(目前沒實作)。
